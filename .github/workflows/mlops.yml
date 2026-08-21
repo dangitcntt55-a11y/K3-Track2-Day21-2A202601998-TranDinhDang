@@ -118,14 +118,18 @@ jobs:
           timeout: 5m
           script: |
             set -e
-            mkdir -p ~/.aws
-            echo "[default]" > ~/.aws/credentials
-            echo "aws_access_key_id = ${{ env.AWS_ACCESS_KEY_ID }}" >> ~/.aws/credentials
-            echo "aws_secret_access_key = ${{ env.AWS_SECRET_ACCESS_KEY }}" >> ~/.aws/credentials
-            echo "region = ${{ env.AWS_DEFAULT_REGION }}" >> ~/.aws/credentials
             sudo systemctl stop mlops-serve || true
             mkdir -p ~/models ~/src
-            aws s3 cp s3://${{ env.S3_BUCKET }}/models/latest/model.pkl ~/models/model.pkl
+            pip install boto3 -q
+            python3 -c "
+            import boto3, os
+            s3 = boto3.client('s3',
+                aws_access_key_id='${{ env.AWS_ACCESS_KEY_ID }}',
+                aws_secret_access_key='${{ env.AWS_SECRET_ACCESS_KEY }}',
+                region_name='${{ env.AWS_DEFAULT_REGION }}')
+            s3.download_file('${{ env.S3_BUCKET }}', 'models/latest/model.pkl', '/root/models/model.pkl')
+            print('Model downloaded from S3')
+            "
             sudo systemctl start mlops-serve
             sleep 10
             for i in 1 2 3 4 5; do
