@@ -9,7 +9,7 @@ import pandas as pd
 import yaml
 import json
 import joblib
-from sklearn.ensemble import RandomForestClassifier, VotingClassifier, ExtraTreesClassifier, HistGradientBoostingClassifier
+from sklearn.ensemble import RandomForestClassifier, ExtraTreesClassifier, HistGradientBoostingClassifier, VotingClassifier
 from sklearn.metrics import accuracy_score, f1_score
 
 EVAL_THRESHOLD = 0.70
@@ -59,16 +59,16 @@ def train(
         mlflow.log_param("eval_samples", len(X_eval))
         mlflow.log_param("use_combined_data", use_combined_data)
 
-        # Create best ensemble model
+        # Create lightweight ensemble model (optimized for memory)
+        # Using smaller estimators that can run on t3.micro (1GB RAM)
         ensemble = VotingClassifier(
             estimators=[
-                ('rf1', RandomForestClassifier(n_estimators=1000, max_depth=25, bootstrap=False, random_state=42, n_jobs=-1)),
-                ('rf2', RandomForestClassifier(n_estimators=1000, max_depth=30, bootstrap=False, random_state=43, n_jobs=-1)),
-                ('et1', ExtraTreesClassifier(n_estimators=500, max_depth=None, random_state=44, n_jobs=-1)),
-                ('hgb', HistGradientBoostingClassifier(max_iter=300, max_depth=12, random_state=46)),
+                ('rf', RandomForestClassifier(n_estimators=200, max_depth=20, bootstrap=False, random_state=42, n_jobs=-1)),
+                ('et', ExtraTreesClassifier(n_estimators=200, max_depth=20, random_state=43, n_jobs=-1)),
+                ('hgb', HistGradientBoostingClassifier(max_iter=150, max_depth=8, random_state=44)),
             ],
             voting='soft',
-            n_jobs=-1
+            n_jobs=1  # Limit parallelism to save memory
         )
 
         ensemble.fit(X_train, y_train)
@@ -80,7 +80,7 @@ def train(
         mlflow.log_metric("accuracy", acc)
         mlflow.log_metric("f1_score", f1)
 
-        # Log model using pickle format (compatible with all sklearn models)
+        # Log model using pickle format
         mlflow.sklearn.log_model(
             ensemble,
             "model",
@@ -108,6 +108,6 @@ if __name__ == "__main__":
 
     print(f"\nFinal accuracy: {acc:.4f}")
     if acc >= 0.70:
-        print("✅ Model passed eval threshold (>= 0.70)")
+        print("[OK] Model passed eval threshold (>= 0.70)")
     else:
-        print(f"⚠️ Model below eval threshold: {acc:.4f} < 0.70")
+        print(f"[WARNING] Model below eval threshold: {acc:.4f} < 0.70")
