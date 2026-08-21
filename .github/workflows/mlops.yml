@@ -17,25 +17,20 @@ env:
 
 jobs:
 
-  # JOB 1 - UNIT TEST
   test:
     name: Unit Test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-python@v5
         with:
           python-version: "3.10"
-
       - name: Install dependencies
         run: pip install -r requirements.txt
-
       - name: Run unit tests
         run: pytest tests/ -v
 
 
-  # JOB 2 - TRAIN
   train:
     name: Train
     needs: test
@@ -45,52 +40,39 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-python@v5
         with:
           python-version: "3.10"
-
       - name: Install dependencies
         run: pip install -r requirements.txt
-
       - name: Configure AWS credentials
         run: |
           mkdir -p ~/.aws
-          cat > ~/.aws/credentials << 'CREDS'
-          [default]
-          aws_access_key_id = ${{ env.AWS_ACCESS_KEY_ID }}
-          aws_secret_access_key = ${{ env.AWS_SECRET_ACCESS_KEY }}
-          region = ${{ env.AWS_DEFAULT_REGION }}
-          CREDS
-
+          echo "[default]" > ~/.aws/credentials
+          echo "aws_access_key_id = ${{ env.AWS_ACCESS_KEY_ID }}" >> ~/.aws/credentials
+          echo "aws_secret_access_key = ${{ env.AWS_SECRET_ACCESS_KEY }}" >> ~/.aws/credentials
+          echo "region = ${{ env.AWS_DEFAULT_REGION }}" >> ~/.aws/credentials
       - name: Pull data with DVC
         run: dvc pull data/train_phase1.csv data/eval.csv
-
       - name: Train model
         run: python src/train.py
-
       - name: Read metrics
         id: read_metrics
         run: |
           ACC=$(python -c "import json; d=json.load(open('outputs/metrics.json')); print(d['accuracy'])")
           echo "accuracy=$ACC" >> $GITHUB_OUTPUT
-
       - name: Upload model to S3
         run: |
-          python - <<'EOF'
-          import boto3
-          import os
-          s3 = boto3.client(
-              's3',
+          python -c "
+          import boto3, os
+          s3 = boto3.client('s3',
               aws_access_key_id=os.environ['AWS_ACCESS_KEY_ID'],
               aws_secret_access_key=os.environ['AWS_SECRET_ACCESS_KEY'],
-              region_name=os.environ['AWS_DEFAULT_REGION']
-          )
+              region_name=os.environ['AWS_DEFAULT_REGION'])
           bucket = os.environ['S3_BUCKET']
           s3.upload_file('models/model.pkl', bucket, 'models/latest/model.pkl')
-          print(f"Model uploaded to s3://{bucket}/models/latest/model.pkl")
-          EOF
-
+          print(f'Model uploaded to s3://{bucket}/models/latest/model.pkl')
+          "
       - name: Save metrics as artifact
         uses: actions/upload-artifact@v4
         with:
@@ -98,40 +80,34 @@ jobs:
           path: outputs/metrics.json
 
 
-  # JOB 3 - EVAL
   eval:
     name: Eval
     needs: train
     runs-on: ubuntu-latest
     steps:
-
       - name: Check eval gate
         run: |
-          python - <<'EOF'
-          acc = float("${{ needs.train.outputs.accuracy }}")
-          print(f"Accuracy: {acc:.4f}")
+          python -c "
+          acc = float('${{ needs.train.outputs.accuracy }}')
+          print(f'Accuracy: {acc:.4f}')
           if acc < 0.70:
-              raise SystemExit(f"FAILED: accuracy {acc:.4f} < 0.70. Huy deploy.")
-          print(f"PASSED: accuracy {acc:.4f} >= 0.70. Dang trien khai model.")
-          EOF
+              raise SystemExit(f'FAILED: accuracy {acc:.4f} < 0.70')
+          print(f'PASSED: accuracy >= 0.70. Dang trien khai model.')
+          "
 
 
-  # JOB 4 - DEPLOY
   deploy:
     name: Deploy
     needs: eval
     runs-on: ubuntu-latest
     steps:
-
-      - name: Configure AWS credentials on runner
+      - name: Configure AWS credentials
         run: |
           mkdir -p ~/.aws
-          cat > ~/.aws/credentials << 'CREDS'
-          [default]
-          aws_access_key_id = ${{ env.AWS_ACCESS_KEY_ID }}
-          aws_secret_access_key = ${{ env.AWS_SECRET_ACCESS_KEY }}
-          region = ${{ env.AWS_DEFAULT_REGION }}
-          CREDS
+          echo "[default]" > ~/.aws/credentials
+          echo "aws_access_key_id = ${{ env.AWS_ACCESS_KEY_ID }}" >> ~/.aws/credentials
+          echo "aws_secret_access_key = ${{ env.AWS_SECRET_ACCESS_KEY }}" >> ~/.aws/credentials
+          echo "region = ${{ env.AWS_DEFAULT_REGION }}" >> ~/.aws/credentials
 
       - name: SSH deploy to EC2
         uses: appleboy/ssh-action@v1.0.3
@@ -139,49 +115,21 @@ jobs:
           host: ${{ secrets.EC2_HOST }}
           username: ${{ secrets.EC2_USER }}
           key: ${{ secrets.EC2_SSH_KEY }}
-          timeout: 120s
+          timeout: 120
           script: |
             set -e
-            echo "Starting deployment..."
-
-            # Configure AWS credentials on EC2
             mkdir -p ~/.aws
-            cat > ~/.aws/credentials << 'CREDS'
-            [default]
-            aws_access_key_id = ${{ env.AWS_ACCESS_KEY_ID }}
-            aws_secret_access_key = ${{ env.AWS_SECRET_ACCESS_KEY }}
-            region = ${{ env.AWS_DEFAULT_REGION }}
-            CREDS
-
-            # Stop existing service
-            echo "Stopping existing service..."
-            sudo systemctl stop mlops-serve 2>/dev/null || true
-
-            # Download model from S3
-            echo "Downloading model from S3..."
+            echo "[default]" > ~/.aws/credentials
+            echo "aws_access_key_id = ${{ env.AWS_ACCESS_KEY_ID }}" >> ~/.aws/credentials
+            echo "aws_secret_access_key = ${{ env.AWS_SECRET_ACCESS_KEY }}" >> ~/.aws/credentials
+            echo "region = ${{ env.AWS_DEFAULT_REGION }}" >> ~/.aws/credentials
+            sudo systemctl stop mlops-serve || true
             aws s3 cp s3://${{ env.S3_BUCKET }}/models/latest/model.pkl ~/models/model.pkl
-
-            # Ensure directories exist
             mkdir -p ~/models ~/src
-
-            # Restart the service
-            echo "Starting service..."
             sudo systemctl start mlops-serve
-
-            # Wait for server to be ready
-            echo "Waiting for server..."
             sleep 10
-
-            # Health check with retry
-            echo "Running health check..."
             for i in 1 2 3 4 5; do
-              echo "Attempt $i..."
-              if curl -sf http://localhost:8000/health; then
-                echo "Health check passed!"
-                exit 0
-              fi
+              curl -sf http://localhost:8000/health && echo "OK" && exit 0
               sleep 5
             done
-
-            echo "Health check failed after 5 attempts"
             exit 1
