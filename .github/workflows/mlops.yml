@@ -124,8 +124,8 @@ jobs:
             echo "aws_secret_access_key = ${{ env.AWS_SECRET_ACCESS_KEY }}" >> ~/.aws/credentials
             echo "region = ${{ env.AWS_DEFAULT_REGION }}" >> ~/.aws/credentials
             sudo systemctl stop mlops-serve || true
-            aws s3 cp s3://${{ env.S3_BUCKET }}/models/latest/model.pkl ~/models/model.pkl
             mkdir -p ~/models ~/src
+            aws s3 cp s3://${{ env.S3_BUCKET }}/models/latest/model.pkl ~/models/model.pkl
             sudo systemctl start mlops-serve
             sleep 10
             for i in 1 2 3 4 5; do
