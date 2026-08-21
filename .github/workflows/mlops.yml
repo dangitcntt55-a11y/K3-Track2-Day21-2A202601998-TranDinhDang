@@ -13,9 +13,6 @@ jobs:
 
   # ---------------------------------------------------------------------------
   # JOB 1 - UNIT TEST
-  # Chay unit tests tren du lieu ao (khong can ket noi cloud storage).
-  # Neu co bat ky test nao that bai, pipeline dung lai o day va khong tien hanh
-  # huan luyen hay trien khai.
   # ---------------------------------------------------------------------------
   test:
     name: Unit Test
@@ -36,8 +33,6 @@ jobs:
 
   # ---------------------------------------------------------------------------
   # JOB 2 - TRAIN
-  # Xac thuc cloud storage, pull du lieu bang DVC, huan luyen mo hinh, upload artifact.
-  # Chi chay khi Job 1 (Unit Test) hoan thanh thanh cong.
   # ---------------------------------------------------------------------------
   train:
     name: Train
@@ -56,19 +51,16 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Authenticate to AWS
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          AWS_DEFAULT_REGION: ${{ secrets.AWS_REGION }}
+      - name: Configure AWS credentials
         run: |
-          echo "AWS credentials configured"
+          mkdir -p ~/.aws
+          echo "[default]" > ~/.aws/credentials
+          echo "aws_access_key_id = ${{ secrets.AWS_ACCESS_KEY_ID }}" >> ~/.aws/credentials
+          echo "aws_secret_access_key = ${{ secrets.AWS_SECRET_ACCESS_KEY }}" >> ~/.aws/credentials
+          echo "region = ${{ secrets.AWS_REGION }}" >> ~/.aws/credentials
+          cat ~/.aws/credentials
 
       - name: Pull data with DVC
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          AWS_DEFAULT_REGION: ${{ secrets.AWS_REGION }}
         run: dvc pull data/train_phase1.csv data/eval.csv
 
       - name: Train model
@@ -81,28 +73,26 @@ jobs:
           echo "accuracy=$ACC" >> $GITHUB_OUTPUT
 
       - name: Upload model to S3
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          AWS_DEFAULT_REGION: ${{ secrets.AWS_REGION }}
-          S3_BUCKET: ${{ secrets.S3_BUCKET }}
         run: |
           python - <<'EOF'
           import os
           import boto3
-          from botocore.config import Config
 
           s3 = boto3.client(
               's3',
               aws_access_key_id=os.environ['AWS_ACCESS_KEY_ID'],
               aws_secret_access_key=os.environ['AWS_SECRET_ACCESS_KEY'],
-              region_name=os.environ['AWS_DEFAULT_REGION'],
-              config=Config(signature_version='s3v4')
+              region_name=os.environ['AWS_DEFAULT_REGION']
           )
           bucket = os.environ['S3_BUCKET']
           s3.upload_file('models/model.pkl', bucket, 'models/latest/model.pkl')
           print(f"Model uploaded to s3://{bucket}/models/latest/model.pkl")
           EOF
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: ${{ secrets.AWS_REGION }}
+          S3_BUCKET: ${{ secrets.S3_BUCKET }}
 
       - name: Save metrics as artifact
         uses: actions/upload-artifact@v4
@@ -113,9 +103,6 @@ jobs:
 
   # ---------------------------------------------------------------------------
   # JOB 3 - EVAL
-  # Kiem tra nguong chat luong (accuracy >= 0.70).
-  # Pipeline dung lai o day neu mo hinh chua dat yeu cau.
-  # Chi chay khi Job 2 (Train) hoan thanh thanh cong.
   # ---------------------------------------------------------------------------
   eval:
     name: Eval
@@ -126,7 +113,9 @@ jobs:
       - name: Check eval gate
         run: |
           python - <<'EOF'
+          import os
           acc = float("${{ needs.train.outputs.accuracy }}")
+          print(f"Accuracy: {acc:.4f}")
           if acc < 0.70:
               raise SystemExit(f"FAILED: accuracy {acc:.4f} < 0.70. Huy deploy.")
           print(f"PASSED: accuracy {acc:.4f} >= 0.70. Dang trien khai model.")
@@ -135,8 +124,6 @@ jobs:
 
   # ---------------------------------------------------------------------------
   # JOB 4 - DEPLOY
-  # Trien khai len EC2 instance qua SSH.
-  # Chi chay khi Job 3 (Eval) hoan thanh thanh cong.
   # ---------------------------------------------------------------------------
   deploy:
     name: Deploy
@@ -150,20 +137,60 @@ jobs:
           host: ${{ secrets.EC2_HOST }}
           username: ${{ secrets.EC2_USER }}
           key: ${{ secrets.EC2_SSH_KEY }}
+          envs:
+            - AWS_ACCESS_KEY_ID
+            - AWS_SECRET_ACCESS_KEY
+            - AWS_DEFAULT_REGION
+            - S3_BUCKET
+          debug: true
+          timeout: 120s
           script: |
-            export AWS_ACCESS_KEY_ID=${{ secrets.AWS_ACCESS_KEY_ID }}
-            export AWS_SECRET_ACCESS_KEY=${{ secrets.AWS_SECRET_ACCESS_KEY }}
-            export AWS_DEFAULT_REGION=${{ secrets.AWS_REGION }}
-            export S3_BUCKET=${{ secrets.S3_BUCKET }}
+            set -e
+
+            echo "Starting deployment..."
+
+            # Configure AWS credentials
+            mkdir -p ~/.aws
+            cat > ~/.aws/credentials << 'CREDS'
+            [default]
+            aws_access_key_id = ${{ secrets.AWS_ACCESS_KEY_ID }}
+            aws_secret_access_key = ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+            region = ${{ secrets.AWS_REGION }}
+            CREDS
+
+            # Stop existing service
+            echo "Stopping existing service..."
+            sudo systemctl stop mlops-serve 2>/dev/null || true
 
             # Download model from S3
-            aws s3 cp s3://$S3_BUCKET/models/latest/model.pkl ~/models/model.pkl
+            echo "Downloading model from S3..."
+            aws s3 cp s3://${{ secrets.S3_BUCKET }}/models/latest/model.pkl ~/models/model.pkl
+
+            # Ensure models directory exists
+            mkdir -p ~/models ~/src
+
+            # Copy serve.py if exists
+            if [ -f ~/src/serve.py ]; then
+                echo "Service file exists"
+            fi
 
             # Restart the service
-            sudo systemctl restart mlops-serve || true
+            echo "Starting service..."
+            sudo systemctl start mlops-serve
 
             # Wait for server to be ready
-            sleep 5
+            echo "Waiting for server..."
+            sleep 10
 
-            # Health check
-            curl -sf http://localhost:8000/health && echo "Health check passed." || exit 1
+            # Health check with retry
+            for i in 1 2 3 4 5; do
+                echo "Health check attempt $i..."
+                if curl -sf http://localhost:8000/health; then
+                    echo "Health check passed!"
+                    exit 0
+                fi
+                sleep 5
+            done
+
+            echo "Health check failed after 5 attempts"
+            exit 1
