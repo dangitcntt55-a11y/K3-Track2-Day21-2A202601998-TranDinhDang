@@ -2,3 +2,4 @@
     remote = myremote
 ['remote "myremote"']
     url = s3://mlops-lab-vinuni-2026/dvc
+    endpointurl = https://s3.us-east-1.amazonaws.com
